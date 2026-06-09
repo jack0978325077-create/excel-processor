@@ -9,7 +9,7 @@ st.title("🐷 豬肉類別自動過濾工具")
 st.write("目前條件設定：")
 st.write("1. 系統會自動篩選，**只留下**商品類別為：`豬肉`、`豬骨`、`豬冷凍` 的數據，其餘類別自動刪除。")
 st.write("2. 刪除完成後，會**自動移除商品類別欄位**，最終檔案只保留：`銷貨日`、`數量`、`客戶編號`、`商品名稱`。")
-st.write("3. ✨ **新功能**：下載的檔名會自動命名為當前的 **年_月份.csv**。")
+st.write("3. ✨ **新功能**：下載的檔名會自動命名為當前的 **年-月-日.csv**。")
 
 # 讓使用者上傳檔案
 uploaded_file = st.file_uploader("選擇您的原始檔案 (.xls, .xlsx)", type=["xls", "xlsx"])
@@ -61,19 +61,6 @@ if uploaded_file is not None:
             # 轉換為 CSV 格式（使用 utf-8-sig 確保用 Excel 打開時中文不會變成亂碼）
             csv_data = final_df.to_csv(index=False, encoding='utf-8-sig')
             
-            # 🎯 核心功能：自動抓取今天的 年份 與 月份 作為檔名 (例如: 2026年06月.csv)
-            # 註：檔名中不建議使用斜線 "/"，因為系統會誤以為是資料夾路徑導致下載失敗，所以用 "年" 和 "月" 隔開
+            # 🎯 核心功能：自動抓取今天的 年-月-日 作為檔名 (例如: 2026-06-09.csv)
             current_time = datetime.now()
-            output_filename = current_time.strftime("%Y年%m月.csv")
-            
-            # 顯示下載按鈕
-            st.download_button(
-                label=f"📥 點我下載 {output_filename}",
-                data=csv_data,
-                file_name=output_filename,
-                mime="text/csv"
-            )
-
-    except Exception as e:
-        st.error(f"❌ 處理檔案時發生錯誤。")
-        st.error(f"錯誤訊息: {e}")
+            output_filename = current_time.strftime("%Y-%m-%d.csv")
