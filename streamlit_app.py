@@ -64,3 +64,15 @@ if uploaded_file is not None:
             # 🎯 核心功能：自動抓取今天的 年-月-日 作為檔名 (例如: 2026-06-09.csv)
             current_time = datetime.now()
             output_filename = current_time.strftime("%Y-%m-%d.csv")
+            
+            # 顯示下載按鈕
+            st.download_button(
+                label=f"📥 點我下載 {output_filename}",
+                data=csv_data,
+                file_name=output_filename,
+                mime="text/csv"
+            )
+
+    except Exception as e:
+        st.error(f"❌ 處理檔案時發生錯誤。")
+        st.error(f"錯誤訊息: {e}")
