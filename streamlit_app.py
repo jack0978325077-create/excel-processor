@@ -6,12 +6,12 @@ from datetime import datetime
 st.set_page_config(page_title="雙檔案自動串接過濾工具", layout="centered")
 
 st.title("🐷 雙檔案自動串接過濾工具")
-st.write("請同時提供 A、B 兩個檔案，系統會自動以『客戶編號』串接，過濾豬肉類別，並重新排序列印。")
+st.write("請同時提供 A、B 兩個檔案，系統會自動以『客戶編號/代號』串接，過濾豬肉類別，並重新排序列印。")
 
 # 讓使用者上傳兩個檔案
 st.subheader("1. 上傳檔案區")
 file_a = st.file_uploader("請上傳 A 檔案 (含有商品類別、數量等)", type=["xls", "xlsx", "csv"])
-file_b = st.file_uploader("請上傳 B 檔案 (含有客戶編號、銷貨時間等)", type=["xls", "xlsx", "csv"])
+file_b = st.file_uploader("請上傳 B 檔案 (含有客戶代號、銷貨時間等)", type=["xls", "xlsx", "csv"])
 
 if file_a is not None and file_b is not None:
     try:
@@ -31,9 +31,9 @@ if file_a is not None and file_b is not None:
             df_b = pd.read_excel(file_b)
         df_b.columns = df_b.columns.str.strip()
         
-        # 檢查必要欄位
+        # 檢查必要欄位 (修正：B 檔案改為檢查 '客戶代號')
         req_a = ['銷貨日', '數量', '客戶編號', '商品名稱', '商品類別']
-        req_b = ['客戶編號', '銷貨時間']
+        req_b = ['客戶代號', '銷貨時間']
         
         missing_a = [c for c in req_a if c not in df_a.columns]
         missing_b = [c for c in req_b if c not in df_b.columns]
@@ -47,18 +47,21 @@ if file_a is not None and file_b is not None:
             allowed_categories = ['豬肉', '豬骨', '豬冷凍']
             df_a_filtered = df_a[df_a['商品類別'].isin(allowed_categories)].copy()
             
-            # 確保兩邊的客戶編號格式一致（轉成字串，去掉 .0）
-            for df_tmp in [df_a_filtered, df_b]:
-                df_tmp['客戶編號'] = df_tmp['客戶編號'].apply(
-                    lambda x: str(int(x)) if pd.notnull(x) and str(x).endswith('.0') else (str(int(x)) if isinstance(x, (int, float)) and pd.notnull(x) else str(x).strip())
-                )
+            # 清理 A 檔的客戶編號格式（轉成字串，去掉 .0）
+            df_a_filtered['客戶編號'] = df_a_filtered['客戶編號'].apply(
+                lambda x: str(int(x)) if pd.notnull(x) and str(x).endswith('.0') else (str(int(x)) if isinstance(x, (int, float)) and pd.notnull(x) else str(x).strip())
+            )
             
-            # 2. 處理 B 檔案：只取客戶編號與銷貨時間，並移除重複的客戶編號避免資料爆炸
-            df_b_clean = df_b[['客戶編號', '銷貨時間']].drop_duplicates(subset=['客戶編號'])
+            # 清理 B 檔的客戶代號格式（轉成字串，去掉 .0）
+            df_b['客戶代號'] = df_b['客戶代號'].apply(
+                lambda x: str(int(x)) if pd.notnull(x) and str(x).endswith('.0') else (str(int(x)) if isinstance(x, (int, float)) and pd.notnull(x) else str(x).strip())
+            )
             
-            # 3. 🎯 核心串接：以客戶編號為基準，把 B 檔的銷貨時間黏進 A 檔
-            # how='left' 代表以 A 檔的資料為主
-            merged_df = pd.merge(df_a_filtered, df_b_clean, on='客戶編號', how='left')
+            # 2. 處理 B 檔案：只取客戶代號與銷貨時間，並移除重複資料避免爆炸
+            df_b_clean = df_b[['客戶代號', '銷貨時間']].drop_duplicates(subset=['客戶代號'])
+            
+            # 3. 🎯 核心串接：讓 A檔的 '客戶編號' 對接 B檔的 '客戶代號'
+            merged_df = pd.merge(df_a_filtered, df_b_clean, left_on='客戶編號', right_on='客戶代號', how='left')
             
             # 4. 🎯 核心排版：嚴格按照您要求的由左至右順序排列
             final_columns = ['銷貨日', '銷貨時間', '數量', '客戶編號', '商品名稱']
