@@ -5,14 +5,11 @@ from datetime import datetime
 
 st.set_page_config(page_title="雙檔案自動串接過濾工具", layout="centered")
 
-st.title("🐷 雙檔案自動串接過濾工具 (時間精準校正版)")
-st.write("系統會自動從 A 檔過濾豬肉，並智慧讀取 B 檔精準的『銷貨時間』依『客戶編號』串接合併。")
+st.title("🐷 雙檔案自動串接過濾工具 (精準 H/I 欄校正版)")
+st.write("已特別為您修改：直接鎖定 B 檔案的 H 欄與 I 欄來精準補足實際購買時間。")
 
-def smart_read_excel(file_obj, required_cols):
-    """
-    智慧讀取 Excel：
-    自動掃描前 10 列，找出包含最多目標欄位的那一列作為 Header。
-    """
+def smart_read_excel_a(file_obj, required_cols):
+    """ 讀取 A 檔案：智慧搜尋標題列 """
     try:
         df_preview = pd.read_excel(file_obj, header=None, nrows=20)
     except Exception:
@@ -37,7 +34,6 @@ def smart_read_excel(file_obj, required_cols):
     return df
 
 def clean_customer_id(x):
-    """ 清洗客戶編號，確保兩邊格式一致才能拼對齊 """
     if pd.isnull(x):
         return ""
     s = str(x).strip()
@@ -49,55 +45,72 @@ def clean_customer_id(x):
 
 # 讓使用者上傳兩個檔案
 st.subheader("1. 上傳檔案區")
-file_a = st.file_uploader("請上傳 A 檔案 (含有商品類別、數量、商品名稱等)", type=["xls", "xlsx", "csv"])
-file_b = st.file_uploader("請上傳 B 檔案 (含有客戶編號、準確的銷貨時間)", type=["xls", "xlsx", "csv"])
+file_a = st.file_uploader("請上傳 A 檔案 (含有商品類別、數量等)", type=["xls", "xlsx", "csv"])
+file_b = st.file_uploader("請上傳 B 檔案 (將直接提取 H 欄與 I 欄)", type=["xls", "xlsx", "csv"])
 
 if file_a is not None and file_b is not None:
     try:
-        st.info("🚀 智慧大腦正在讀取 A、B 檔案並以 B 檔時間為準進行校正...")
+        st.info("🚀 智慧大腦正在讀取 A 檔，並強制提取 B 檔 H 與 I 欄進行時間校正...")
         
-        # 定義各自需要的必要欄位 (A檔不需要管時間，B檔一定要有時間)
+        # 1. 讀取 A 檔案
         req_a = ['銷貨日', '數量', '客戶編號', '商品名稱', '商品類別']
-        req_b = ['客戶編號', '銷貨時間']
-        
-        df_a = smart_read_excel(file_a, req_a)
-        df_b = smart_read_excel(file_b, req_b)
+        df_a = smart_read_excel_a(file_a, req_a)
         
         missing_a = [c for c in req_a if c not in df_a.columns]
-        missing_b = [c for c in req_b if c not in df_b.columns]
-        
-        if missing_a or missing_b:
-            if missing_a: st.error(f"❌ A 檔案缺少欄位：{', '.join(missing_a)}")
-            if missing_b: st.error(f"❌ B 檔案缺少欄位：{', '.join(missing_b)}")
+        if missing_a:
+            st.error(f"❌ A 檔案缺少欄位：{', '.join(missing_a)}")
         else:
-            # 1. 處理 A 檔案：過濾豬肉類別
+            # 2. 強制不設標題讀取 B 檔案全部內容，方便我們用欄位編號去抓
+            if file_b.name.endswith('.csv'):
+                df_b_raw = pd.read_csv(file_b, header=None)
+            else:
+                df_b_raw = pd.read_excel(file_b, header=None)
+            
+            # Excel 的 H 欄是索引 7 (第8欄)，I 欄是索引 8 (第9欄)
+            # 為了防呆，我們自動判斷這兩欄哪一個是客戶編號(通常是純數字或較短)，哪一個是時間
+            col_h = df_b_raw[7].astype(str).str.strip()
+            col_i = df_b_raw[8].astype(str).str.strip()
+            
+            # 智慧判斷：哪一欄包含冒號 ':' 或者時間格式，哪一欄就是時間
+            h_has_time = col_h.str.contains(':', na=False).sum()
+            i_has_time = col_i.str.contains(':', na=False).sum()
+            
+            if i_has_time > h_has_time:
+                df_b_clean = pd.DataFrame({'B_客戶': df_b_raw[7], 'B_時間': df_b_raw[8]})
+            else:
+                df_b_clean = pd.DataFrame({'B_客戶': df_b_raw[8], 'B_時間': df_b_raw[7]})
+            
+            # 3. 處理 A 檔案：過濾豬肉類別
             df_a['商品類別'] = df_a['商品類別'].astype(str).str.strip()
             allowed_categories = ['豬肉', '豬骨', '豬冷凍']
             df_a_filtered = df_a[df_a['商品類別'].isin(allowed_categories)].copy()
             
-            # 2. 強制格式對齊：把兩邊的客戶編號都轉成最乾淨的純文字
+            # 4. 強力清洗兩邊的客戶編號格式
             df_a_filtered['客戶編號_對齊用'] = df_a_filtered['客戶編號'].apply(clean_customer_id)
-            df_b['客戶編號_對齊用'] = df_b['客戶編號'].apply(clean_customer_id)
+            df_b_clean['客戶編號_對齊用'] = df_b_clean['B_客戶'].apply(clean_customer_id)
             
-            # 3. 處理 B 檔案：只拿客戶編號跟正確的銷貨時間，並移除重複資料避免爆炸
-            df_b_clean = df_b[['客戶編號_對齊用', '銷貨時間']].dropna(subset=['客戶編號_對齊用'])
-            df_b_clean = df_b_clean.drop_duplicates(subset=['客戶編號_對齊用'])
+            # 移除 B 檔重複資料
+            df_b_final = df_b_clean.dropna(subset=['客戶編號_對齊用'])
+            df_b_final = df_b_final.drop_duplicates(subset=['客戶編號_對齊用'])
             
-            # 4. 🎯 核心串接：以 A 檔為主，把 B 檔中準確的 '銷貨時間' 黏過來
-            merged_df = pd.merge(df_a_filtered, df_b_clean, on='客戶編號_對齊用', how='left')
+            # 5. 🎯 核心串接：將 B 檔 H/I 欄分離出來的正確時間黏回 A 檔
+            merged_df = pd.merge(df_a_filtered, df_b_final, on='客戶編號_對齊用', how='left')
             
-            # 5. 🎯 核心排版：嚴格按照您要求的由左至右順序排列
+            # 欄位重新命名為您要求的名稱
+            merged_df['銷貨時間'] = merged_df['B_時間']
+            
+            # 6. 🎯 核心排版：由左至右
             final_columns = ['銷貨日', '銷貨時間', '數量', '客戶編號', '商品名稱']
             final_df = merged_df[final_columns].copy()
             
-            # 6. 細節優化（修剪日期時間格式）
+            # 7. 細節優化
             if '銷貨日' in final_df.columns:
                 final_df['銷貨日'] = final_df['銷貨日'].astype(str).str.split(' ').str[0]
             if '銷貨時間' in final_df.columns:
                 final_df['銷貨時間'] = final_df['銷貨時間'].astype(str).str.strip()
                 final_df['銷貨時間'] = final_df['銷貨時間'].replace({'nan': '未對齊', 'None': '未對齊'})
             
-            st.success("✨ 雙檔案精準校正串接成功！")
+            st.success("✨ 雙檔案精準 H/I 欄位校正對齊成功！")
             st.subheader("📋 最終 CSV 資料預覽：")
             st.dataframe(final_df)
             
