@@ -3,65 +3,79 @@ import pandas as pd
 import io
 from datetime import datetime
 
-st.set_page_config(page_title="銷貨明細特定類別篩選器", layout="centered")
+st.set_page_config(page_title="雙檔案自動串接過濾工具", layout="centered")
 
-st.title("🐷 豬肉類別自動過濾工具")
-st.write("目前條件設定：")
-st.write("1. 系統會自動篩選，**只留下**商品類別為：`豬肉`、`豬骨`、`豬冷凍` 的數據，其餘類別自動刪除。")
-st.write("2. 刪除完成後，會**自動移除商品類別欄位**，最終檔案只保留：`銷貨日`、`數量`、`客戶編號`、`商品名稱`。")
-st.write("3. ✨ **新功能**：下載的檔名會自動命名為當前的 **年-月-日.csv**。")
+st.title("🐷 雙檔案自動串接過濾工具")
+st.write("請同時提供 A、B 兩個檔案，系統會自動以『客戶編號』串接，過濾豬肉類別，並重新排序列印。")
 
-# 讓使用者上傳檔案
-uploaded_file = st.file_uploader("選擇您的原始檔案 (.xls, .xlsx)", type=["xls", "xlsx"])
+# 讓使用者上傳兩個檔案
+st.subheader("1. 上傳檔案區")
+file_a = st.file_uploader("請上傳 A 檔案 (含有商品類別、數量等)", type=["xls", "xlsx", "csv"])
+file_b = st.file_uploader("請上傳 B 檔案 (含有客戶編號、銷貨時間等)", type=["xls", "xlsx", "csv"])
 
-if uploaded_file is not None:
+if file_a is not None and file_b is not None:
     try:
-        st.info("正在讀取並處理檔案中...")
+        st.info("正在讀取並串接檔案中...")
         
-        # 讀取 Excel 檔案
-        df = pd.read_excel(uploaded_file)
-            
-        # 自動移除欄位名稱前後可能有的空格
-        df.columns = df.columns.str.strip()
-        
-        # 檢查必要的欄位是否存在
-        required_columns = ['銷貨日', '數量', '客戶編號', '商品名稱', '商品類別']
-        missing_columns = [col for col in required_columns if col not in df.columns]
-        
-        if missing_columns:
-            st.error(f"❌ 檔案中缺少必要的欄位：{', '.join(missing_columns)}，請檢查原始檔案。")
+        # --- 讀取 A 檔案 ---
+        if file_a.name.endswith('.csv'):
+            df_a = pd.read_csv(file_a)
         else:
-            # 1. 先抓出需要的 5 個欄位做處理
-            temp_df = df[required_columns].copy()
-            
-            # 清除商品類別可能含有的前後空白字元
-            temp_df['商品類別'] = temp_df['商品類別'].astype(str).str.strip()
-            
-            # 2. 核心過濾：只留下商品類別為 豬肉、豬骨、豬冷凍 的資料
+            df_a = pd.read_excel(file_a)
+        df_a.columns = df_a.columns.str.strip()
+        
+        # --- 讀取 B 檔案 ---
+        if file_b.name.endswith('.csv'):
+            df_b = pd.read_csv(file_b)
+        else:
+            df_b = pd.read_excel(file_b)
+        df_b.columns = df_b.columns.str.strip()
+        
+        # 檢查必要欄位
+        req_a = ['銷貨日', '數量', '客戶編號', '商品名稱', '商品類別']
+        req_b = ['客戶編號', '銷貨時間']
+        
+        missing_a = [c for c in req_a if c not in df_a.columns]
+        missing_b = [c for c in req_b if c not in df_b.columns]
+        
+        if missing_a or missing_b:
+            if missing_a: st.error(f"❌ A 檔案缺少欄位：{', '.join(missing_a)}")
+            if missing_b: st.error(f"❌ B 檔案缺少欄位：{', '.join(missing_b)}")
+        else:
+            # 1. 處理 A 檔案：過濾豬肉類別
+            df_a['商品類別'] = df_a['商品類別'].astype(str).str.strip()
             allowed_categories = ['豬肉', '豬骨', '豬冷凍']
-            filtered_df = temp_df[temp_df['商品類別'].isin(allowed_categories)].copy()
+            df_a_filtered = df_a[df_a['商品類別'].isin(allowed_categories)].copy()
             
-            # 3. 核心刪除：刪除整個「商品類別」欄位，不放進最終成果
-            final_df = filtered_df.drop(columns=['商品類別'])
-            
-            # 優化：如果客戶編號後面有 .0 (例如 230084.0)，自動把它去掉，變成乾淨的純數字文字
-            if '客戶編號' in final_df.columns:
-                final_df['客戶編號'] = final_df['客戶編號'].apply(
-                    lambda x: str(int(x)) if pd.notnull(x) and str(x).endswith('.0') else (str(int(x)) if isinstance(x, (int, float)) and pd.notnull(x) else x)
+            # 確保兩邊的客戶編號格式一致（轉成字串，去掉 .0）
+            for df_tmp in [df_a_filtered, df_b]:
+                df_tmp['客戶編號'] = df_tmp['客戶編號'].apply(
+                    lambda x: str(int(x)) if pd.notnull(x) and str(x).endswith('.0') else (str(int(x)) if isinstance(x, (int, float)) and pd.notnull(x) else str(x).strip())
                 )
             
-            # 優化：銷貨日如果包含時間 (如 12:00:00 AM)，只保留日期部分
+            # 2. 處理 B 檔案：只取客戶編號與銷貨時間，並移除重複的客戶編號避免資料爆炸
+            df_b_clean = df_b[['客戶編號', '銷貨時間']].drop_duplicates(subset=['客戶編號'])
+            
+            # 3. 🎯 核心串接：以客戶編號為基準，把 B 檔的銷貨時間黏進 A 檔
+            # how='left' 代表以 A 檔的資料為主
+            merged_df = pd.merge(df_a_filtered, df_b_clean, on='客戶編號', how='left')
+            
+            # 4. 🎯 核心排版：嚴格按照您要求的由左至右順序排列
+            final_columns = ['銷貨日', '銷貨時間', '數量', '客戶編號', '商品名稱']
+            final_df = merged_df[final_columns].copy()
+            
+            # 優化：銷貨日如果包含時間，只保留日期部分
             if '銷貨日' in final_df.columns:
                 final_df['銷貨日'] = final_df['銷貨日'].astype(str).str.split(' ').str[0]
             
-            st.success(f"✨ 成功過濾！已刪除無關類別，並移除了商品類別欄位。")
+            st.success("✨ 雙檔案串接與過濾成功！")
             st.subheader("📋 最終 CSV 資料預覽：")
             st.dataframe(final_df)
             
-            # 轉換為 CSV 格式（使用 utf-8-sig 確保用 Excel 打開時中文不會變成亂碼）
+            # 轉換為 CSV 格式
             csv_data = final_df.to_csv(index=False, encoding='utf-8-sig')
             
-            # 🎯 核心功能：自動抓取今天的 年-月-日 作為檔名 (例如: 2026-06-09.csv)
+            # 自動產生今天日期的檔名
             current_time = datetime.now()
             output_filename = current_time.strftime("%Y-%m-%d.csv")
             
@@ -74,5 +88,6 @@ if uploaded_file is not None:
             )
 
     except Exception as e:
-        st.error(f"❌ 處理檔案時發生錯誤。")
-        st.error(f"錯誤訊息: {e}")
+        st.error(f"❌ 處理檔案時發生錯誤：{e}")
+else:
+    st.warning("⏳ 請同時上傳 A 檔案與 B 檔案以開始處理。")
