@@ -7,7 +7,7 @@ from datetime import datetime
 st.set_page_config(page_title="客戶交易與明細深度查詢工具", layout="wide", page_icon="🔍")
 
 st.title("🔍 客戶交易與發票收據深度查詢系統")
-st.write("💡 **發票總表檢視**：一筆發票/交易呈現為一橫列。點選該筆發票，即可彈出完整購買品項清單。")
+st.write("💡 **發票總表檢視**：一筆發票是一橫列，右側已自動將**各品項獨立展開為欄位並標註數量**。點選發票最左側圓圈可彈出詳細收據。")
 
 def clean_customer_id(x):
     if pd.isnull(x):
@@ -44,7 +44,7 @@ def extract_hour(time_val):
             return h
     return None
 
-# 彈出視窗：顯示點選發票的內部所有品項明細
+# 彈出視窗：顯示點選發票的內部所有品項明細收據
 @st.dialog("🧾 發票消費明細收據")
 def show_order_detail_dialog(invoice_id, full_source_df):
     items = full_source_df[full_source_df['發票單號_鍵'] == invoice_id].copy()
@@ -152,8 +152,7 @@ if uploaded_files:
         full_detail_df['客戶編號_清洗'] = full_detail_df[col_id].apply(clean_customer_id) if col_id in full_detail_df.columns else ""
         full_detail_df['標準日期'] = full_detail_df[col_date].apply(try_parse_date) if col_date in full_detail_df.columns else None
         full_detail_df['標準品名'] = full_detail_df[col_item].astype(str).str.strip() if col_item in full_detail_df.columns else ""
-        
-        # 支援負數（折讓）與千分位逗號清洗
+
         def clean_numeric(val):
             if pd.isnull(val):
                 return 0.0
@@ -166,17 +165,15 @@ if uploaded_files:
         full_detail_df['標準金額'] = full_detail_df[col_amount].apply(clean_numeric) if col_amount in full_detail_df.columns else 0.0
         full_detail_df['標準數量'] = full_detail_df[col_qty].apply(clean_numeric) if col_qty in full_detail_df.columns else 0.0
 
-        # 發票號碼判定（優先鎖定 DP 或銷貨單號）
         if col_inv and col_inv in full_detail_df.columns and full_detail_df[col_inv].dropna().nunique() > 1:
             full_detail_df['發票單號_鍵'] = full_detail_df[col_inv].astype(str).str.strip()
         else:
             full_detail_df['發票單號_鍵'] = full_detail_df['標準日期'].astype(str) + "_" + full_detail_df['客戶編號_清洗']
 
-        # 2. 深度解析 B 檔（全欄位尋找 單號、時間、備註、日期）
+        # 2. 深度解析 B 檔
         b_records = []
         for df_b in time_dfs:
             num_cols = len(df_b.columns)
-            # 依欄位內容特徵尋找
             col_b_order = None
             col_b_time = None
             col_b_remark = None
@@ -187,20 +184,15 @@ if uploaded_files:
                 series_str = df_b[c].dropna().astype(str).str.strip()
                 if series_str.empty:
                     continue
-                # 偵測單號 (DP 開頭)
                 if col_b_order is None and series_str.str.contains(r'^[A-Za-z]{2}\d+', na=False).sum() > 0:
                     col_b_order = c
-                # 偵測時間 (含冒號)
                 if col_b_time is None and series_str.str.contains(r'^\d{1,2}:\d{2}', na=False).sum() > 0:
                     col_b_time = c
-                # 偵測備註 (含信用卡字樣)
                 if col_b_remark is None and series_str.str.contains(r'信用卡|卡號|授權碼', na=False).sum() > 0:
                     col_b_remark = c
-                # 偵測日期
                 if col_b_date is None and series_str.str.contains(r'^\d{4}[-/]\d{1,2}[-/]\d{1,2}', na=False).sum() > 0:
                     col_b_date = c
 
-            # 若沒明確偵測到，使用預設常見欄位
             if col_b_time is None and num_cols >= 8:
                 col_b_time = 8 if num_cols >= 9 and ':' in str(df_b.iloc[0:5, 8].values) else 7
             if col_b_cust is None and num_cols >= 8:
@@ -223,8 +215,7 @@ if uploaded_files:
 
         full_b_df = pd.DataFrame(b_records)
 
-        # 3. 雙重精準橫向串接 (Merge)
-        # 策略 A：如果 A 與 B 都有單號 (DP...)，以單號進行 100% 精準對齊
+        # 3. 雙重精準橫向串接
         has_dp_a = full_detail_df['發票單號_鍵'].str.contains(r'^[A-Za-z]{2}\d+', na=False).any()
         has_dp_b = (full_b_df['B_單號'].str.contains(r'^[A-Za-z]{2}\d+', na=False).sum() > 0) if not full_b_df.empty else False
 
@@ -232,11 +223,8 @@ if uploaded_files:
             b_clean = full_b_df[full_b_df['B_單號'] != ""].drop_duplicates(subset=['B_單號'])
             merged_items_df = pd.merge(full_detail_df, b_clean[['B_單號', 'B_時間', 'B_備註']], left_on='發票單號_鍵', right_on='B_單號', how='left')
         else:
-            # 策略 B：以 (客戶 + 日期) 對齊，避免不同天互相覆蓋！
             full_detail_df['客戶_日期_鍵'] = full_detail_df['客戶編號_清洗'] + "_" + full_detail_df['標準日期'].astype(str)
             full_b_df['客戶_日期_鍵'] = full_b_df['B_客戶'] + "_" + full_b_df['B_日期'].astype(str)
-            
-            # 若 B 檔無日期欄，退回用 客戶 串接
             if full_b_df['B_日期'].isnull().all():
                 b_clean = full_b_df.drop_duplicates(subset=['B_客戶'])
                 merged_items_df = pd.merge(full_detail_df, b_clean[['B_客戶', 'B_時間', 'B_備註']], left_on='客戶編號_清洗', right_on='B_客戶', how='left')
@@ -248,7 +236,6 @@ if uploaded_files:
         merged_items_df['B_備註'] = merged_items_df['B_備註'].fillna('')
         merged_items_df['小時'] = merged_items_df['銷貨時間'].apply(extract_hour)
 
-        # 付款方式精準識別
         def check_pay(text):
             s = str(text)
             if any(k in s for k in ['信用卡', '卡號', '授權碼', '刷卡']):
@@ -266,41 +253,50 @@ if uploaded_files:
             merged_items_df['載具狀態'] = "未提供欄位"
             merged_items_df['載具內容'] = ""
 
-        # --- 聚合成「發票總表」---
-        invoice_summary_df = merged_items_df.groupby('發票單號_鍵').agg(
+        # --- 4. 關鍵升級：將各品項透視展開為獨立數量欄位 ---
+        # 建立基礎發票資訊表頭
+        base_invoice_df = merged_items_df.groupby('發票單號_鍵').agg(
             標準日期=('標準日期', 'first'),
             銷貨時間=('銷貨時間', 'first'),
             小時=('小時', 'first'),
             客戶編號_清洗=('客戶編號_清洗', 'first'),
             發票總金額=('標準金額', 'sum'),
-            購買總數量=('標準數量', 'sum'),
-            品項種類數=('標準品名', 'nunique'),
-            全部品項清單=('標準品名', lambda s: '、'.join([str(x).strip() for x in s.unique() if str(x).strip() != ''])),
             標準付款方式=('標準付款方式', 'first'),
             載具狀態=('載具狀態', 'first'),
             載具內容=('載具內容', 'first')
         ).reset_index()
 
-        st.sidebar.success(f"✅ 對齊成功！共有 {len(invoice_summary_df)} 筆發票/交易記錄。")
+        # 透視各發票在「各品項」的購買數量
+        item_qty_pivot = merged_items_df.pivot_table(
+            index='發票單號_鍵',
+            columns='標準品名',
+            values='標準數量',
+            aggfunc='sum',
+            fill_value=0.0
+        ).reset_index()
+
+        # 合併成一張完整寬表格
+        invoice_summary_df = pd.merge(base_invoice_df, item_qty_pivot, on='發票單號_鍵', how='left')
+
+        # 取得所有展開的品項欄位名稱清單
+        product_cols = [c for c in item_qty_pivot.columns if c != '發票單號_鍵' and c.strip() != '']
+
+        st.sidebar.success(f"✅ 對齊成功！共有 {len(invoice_summary_df)} 筆發票，已展開 {len(product_cols)} 個商品品項欄位。")
 
         # --- 側邊欄篩選 ---
         st.sidebar.markdown("---")
         st.sidebar.subheader("🎯 篩選條件")
 
-        # 客戶篩選
         all_customers = sorted([c for c in invoice_summary_df['客戶編號_清洗'].unique() if c])
         search_kw = st.sidebar.text_input("🔍 客戶編號搜尋", placeholder="輸入客戶編號")
         matched_customers = [c for c in all_customers if search_kw.strip() in c] if search_kw else all_customers
         selected_customer = st.sidebar.selectbox("選擇指定客戶", options=["(全部客戶)"] + matched_customers)
 
-        # 金額門檻
         max_inv_amount = float(invoice_summary_df['發票總金額'].max()) if not invoice_summary_df.empty else 10000.0
         min_price = st.sidebar.number_input("💰 發票消費總額高於 (元) :", min_value=0.0, max_value=max_inv_amount, value=0.0, step=100.0)
 
-        # 付款方式
         selected_pay = st.sidebar.radio("💳 付款方式", ["全部", "現金", "刷卡"], horizontal=True)
 
-        # 時段
         time_slot_options = [
             "全部時段", "早市/清晨 (05:00 - 08:59)", "上午時段 (09:00 - 11:59)",
             "中午時段 (12:00 - 13:59)", "下午時段 (14:00 - 17:59)", "晚間時段 (18:00 - 21:59)", "自訂時段區間"
@@ -310,17 +306,14 @@ if uploaded_files:
         if selected_time_slot == "自訂時段區間":
             custom_hour_range = st.sidebar.slider("選擇時段 (小時)", 0, 23, (6, 18))
 
-        # 日期
         dates_available = sorted([d for d in invoice_summary_df['標準日期'].dropna().unique()])
         date_range = st.sidebar.date_input(
             "📅 交易日期區間",
             value=(datetime.strptime(dates_available[0], '%Y-%m-%d'), datetime.strptime(dates_available[-1], '%Y-%m-%d'))
         ) if dates_available else None
 
-        # 載具
         carrier_filter = st.sidebar.radio("📱 載具條件", ["全部", "有載具", "無載具"], horizontal=True)
 
-        # 品項關鍵字
         st.sidebar.markdown("---")
         item_kw = st.sidebar.text_input("🥩 品項關鍵字搜尋 (例如：軟骨)", value="", placeholder="輸入軟骨、梅花肉...")
 
@@ -357,19 +350,23 @@ if uploaded_files:
         if carrier_filter != "全部":
             filtered_inv_df = filtered_inv_df[filtered_inv_df['載具狀態'] == carrier_filter]
 
+        # 關鍵字過濾：找出該關鍵字對應的所有品項欄位，只要其中任一欄數量 > 0 就保留
         clean_kw_list = [k.strip() for k in re.split(r'[,，\s]+', item_kw) if k.strip()]
         if clean_kw_list:
-            kw_pattern = '|'.join([re.escape(k) for k in clean_kw_list])
-            filtered_inv_df = filtered_inv_df[filtered_inv_df['全部品項清單'].str.contains(kw_pattern, case=False, na=False)]
+            matched_product_cols = [p for p in product_cols if any(k in p for k in clean_kw_list)]
+            if matched_product_cols:
+                has_product_mask = (filtered_inv_df[matched_product_cols] > 0).any(axis=1)
+                filtered_inv_df = filtered_inv_df[has_product_mask]
+            else:
+                filtered_inv_df = filtered_inv_df.iloc[0:0]
 
         # --- 數據呈現 ---
         st.subheader("📊 發票查詢結果概況")
 
         if len(filtered_inv_df) == 0:
-            st.warning("⚠️ 目前查無任何發票！請確認條件。")
+            st.warning("⚠️ 目前查無任何發票！請確認篩選條件。")
         else:
             total_amount = filtered_inv_df['發票總金額'].sum()
-            total_quantity = filtered_inv_df['購買總數量'].sum()
             total_invoices = len(filtered_inv_df)
             has_carrier_count = (filtered_inv_df['載具狀態'] == "有載具").sum()
             carrier_rate = (has_carrier_count / total_invoices * 100) if total_invoices > 0 else 0
@@ -382,13 +379,23 @@ if uploaded_files:
             c3.metric("💳 現金 / 刷卡單數", f"現金 {cash_count} 張 | 刷卡 {card_count} 張")
             c4.metric("📱 載具發票比例", f"{carrier_rate:.1f}% ({has_carrier_count} 張)")
 
-            st.markdown("### 📋 發票清單（💡 點擊任一發票列最左側的圓圈，即可彈出該發票完整明細收據）")
+            st.markdown("### 📋 發票各品項數量總表（💡 點擊最左側圓圈，可彈出單據收據）")
 
-            display_cols = ['標準日期', '銷貨時間', '發票單號_鍵', '客戶編號_清洗', '發票總金額', '購買總數量', '標準付款方式', '載具狀態', '全部品項清單']
-            table_show = filtered_inv_df[display_cols].reset_index(drop=True)
+            # 動態過濾：只顯示目前篩選出的發票有實際購買（總和 > 0）的品項欄位，避免表格過於雜亂
+            active_product_cols = [p for p in product_cols if p in filtered_inv_df.columns and filtered_inv_df[p].sum() > 0]
+            
+            # 排列顯示欄位：基本資料在前，各品項數量在後
+            base_display_cols = ['標準日期', '銷貨時間', '發票單號_鍵', '客戶編號_清洗', '發票總金額', '標準付款方式', '載具狀態']
+            final_display_cols = base_display_cols + active_product_cols
+            table_show = filtered_inv_df[final_display_cols].reset_index(drop=True)
+
+            # 格式化數值
+            format_dict = {'發票總金額': '${:,.0f}'}
+            for p in active_product_cols:
+                format_dict[p] = '{:,.2f}'
 
             event = st.dataframe(
-                table_show.style.format({'發票總金額': '${:,.0f}', '購買總數量': '{:,.2f}'}),
+                table_show.style.format(format_dict),
                 use_container_width=True,
                 on_select="rerun",
                 selection_mode="single-row"
@@ -400,12 +407,17 @@ if uploaded_files:
                 clicked_inv_id = table_show.iloc[selected_idx]['發票單號_鍵']
                 show_order_detail_dialog(clicked_inv_id, merged_items_df)
 
-            csv_export = table_show.to_csv(index=False, encoding='utf-8-sig')
+            # --- 匯出 Excel (.xlsx) 功能 ---
+            output = io.BytesIO()
+            with pd.ExcelWriter(output, engine='openpyxl') as writer:
+                table_show.to_excel(writer, index=False, sheet_name='發票品項明細表')
+            excel_data = output.getvalue()
+
             st.download_button(
-                label="📥 匯出當前發票總表為 CSV",
-                data=csv_export,
-                file_name=f"發票總表查詢_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
-                mime="text/csv"
+                label="📥 匯出當前發票各品項數量明細為 Excel (.xlsx)",
+                data=excel_data,
+                file_name=f"發票品項數量總表_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             )
 
     except Exception as e:
