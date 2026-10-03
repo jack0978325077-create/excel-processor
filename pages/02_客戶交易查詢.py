@@ -7,7 +7,7 @@ from datetime import datetime
 st.set_page_config(page_title="客戶交易與明細深度查詢工具", layout="wide", page_icon="🔍")
 
 st.title("🔍 客戶交易與品項明細深度查詢系統")
-st.write("💡 支援多條件組合查詢：**特定客戶、消費金額門檻、現金/刷卡支付方式、消費時段、載具狀態、商品關鍵字**。")
+st.write("💡 支援多條件組合查詢：**特定客戶、整單消費金額門檻、現金/刷卡支付方式、消費時段、載具狀態、商品關鍵字**。")
 
 def clean_customer_id(x):
     if pd.isnull(x):
@@ -108,24 +108,10 @@ if uploaded_files:
         full_df['客戶編號_清洗'] = full_df[col_id].apply(clean_customer_id) if col_id in full_df.columns else "未知客戶"
         full_df['標準日期'] = full_df[col_date].apply(try_parse_date) if col_date in full_df.columns else None
         
-        # 標記商品名稱（轉純文字避免空值比對錯誤）
-        if col_item in full_df.columns:
-            full_df['標準品名'] = full_df[col_item].astype(str).str.strip()
-        else:
-            full_df['標準品名'] = ""
+        # 標記品名
+        full_df['標準品名'] = full_df[col_item].astype(str).str.strip() if col_item in full_df.columns else ""
 
-        # 單號欄位處理
-        if col_order and col_order in full_df.columns:
-            full_df['標準單號'] = full_df[col_order].astype(str).str.strip()
-        else:
-            # 若無單號欄位，以 日期+客戶 視為同筆單據
-            full_df['標準單號'] = full_df['標準日期'].astype(str) + "_" + full_df['客戶編號_清洗']
-
-        if col_time and col_time in full_df.columns:
-            full_df['小時'] = full_df[col_time].apply(extract_hour)
-        else:
-            full_df['小時'] = None
-
+        # 數值轉換
         if col_amount in full_df.columns:
             full_df['標準金額'] = pd.to_numeric(full_df[col_amount].astype(str).str.replace(',', ''), errors='coerce').fillna(0.0)
         else:
@@ -136,16 +122,35 @@ if uploaded_files:
         else:
             full_df['標準數量'] = 0.0
 
-        # 付款方式精準判斷
-        def detect_card_or_cash(row):
-            remark_text = ""
-            if col_remark and col_remark in row and pd.notnull(row[col_remark]):
-                remark_text += str(row[col_remark]).strip()
-            if any(k in remark_text for k in ['信用卡', '卡號', '授權碼', '刷卡']):
-                return "刷卡"
-            return "現金"
+        # 定義唯一「單據編號」
+        if col_order and col_order in full_df.columns and full_df[col_order].dropna().nunique() > 1:
+            full_df['標準單號'] = full_df[col_order].astype(str).str.strip()
+        else:
+            # 若無單號欄位，以 日期+時間+客戶 當作同一筆單
+            time_part = full_df[col_time].astype(str).str.strip() if (col_time and col_time in full_df.columns) else ""
+            full_df['標準單號'] = full_df['標準日期'].astype(str) + "_" + time_part + "_" + full_df['客戶編號_清洗']
 
-        full_df['標準付款方式'] = full_df.apply(detect_card_or_cash, axis=1)
+        # 計算每一筆「單據」的【整單總金額】
+        order_total_map = full_df.groupby('標準單號')['標準金額'].sum().to_dict()
+        full_df['整單總金額'] = full_df['標準單號'].map(order_total_map)
+
+        if col_time and col_time in full_df.columns:
+            full_df['小時'] = full_df[col_time].apply(extract_hour)
+        else:
+            full_df['小時'] = None
+
+        # 付款方式精準判斷（整單傳遞：若同單任一列備註寫信用卡，整單視為刷卡）
+        def detect_card(val):
+            if pd.isnull(val):
+                return False
+            s = str(val).strip()
+            return any(k in s for k in ['信用卡', '卡號', '授權碼', '刷卡'])
+
+        if col_remark and col_remark in full_df.columns:
+            card_orders = set(full_df[full_df[col_remark].apply(detect_card)]['標準單號'])
+            full_df['標準付款方式'] = full_df['標準單號'].apply(lambda x: "刷卡" if x in card_orders else "現金")
+        else:
+            full_df['標準付款方式'] = "現金"
 
         # 載具狀態
         if col_carrier and col_carrier in full_df.columns:
@@ -167,8 +172,9 @@ if uploaded_files:
         matched_customers = [c for c in all_customers if search_kw.strip() in c] if search_kw else all_customers
         selected_customer = st.sidebar.selectbox("選擇指定客戶", options=["(全部客戶)"] + matched_customers)
 
-        # 2. 金額門檻篩選
-        max_amount_data = float(full_df['標準金額'].max()) if not full_df.empty else 10000.0
+        # 2. 金額門檻篩選（可選依整單或單品）
+        price_mode = st.sidebar.radio("金額門檻計算方式：", ["整筆交易總額", "單一品項金額"], index=0)
+        max_amount_data = float(full_df['整單總金額'].max()) if not full_df.empty else 10000.0
         min_price = st.sidebar.number_input("💰 消費金額高於 (元) :", min_value=0.0, max_value=max_amount_data, value=0.0, step=100.0)
 
         # 3. 付款方式篩選
@@ -203,28 +209,35 @@ if uploaded_files:
         # 6. 載具條件
         carrier_filter = st.sidebar.radio("📱 載具條件", ["全部", "有載具", "無載具"], horizontal=True)
 
-        # 7. 品項關鍵字篩選 (支援多詞與整筆交易反查)
+        # 7. 品項關鍵字篩選
         st.sidebar.markdown("---")
         st.sidebar.subheader("🥩 品項關鍵字設定")
-        item_kw = st.sidebar.text_input("輸入關鍵字 (如：軟骨 或 軟骨,五花)", placeholder="輸入如：軟骨")
+        item_kw = st.sidebar.text_input("輸入關鍵字 (如：軟骨 或 軟骨,五花)", value="", placeholder="例如：軟骨")
         kw_mode = st.sidebar.radio(
             "關鍵字呈現範圍：",
-            ["僅看含有關鍵字的商品明細", "反查整筆交易（有買此商品的那整單都要看）"],
+            ["反查整筆交易（有買此商品的那整單都要看）", "僅看含有關鍵字的商品明細"],
             index=0
         )
 
-        # --- 資料過濾 ---
+        # --- 資料過濾流程 ---
         filtered_df = full_df.copy()
 
+        # 客戶過濾
         if selected_customer != "(全部客戶)":
             filtered_df = filtered_df[filtered_df['客戶編號_清洗'] == selected_customer]
 
+        # 金額門檻過濾
         if min_price > 0:
-            filtered_df = filtered_df[filtered_df['標準金額'] >= min_price]
+            if price_mode == "整筆交易總額":
+                filtered_df = filtered_df[filtered_df['整單總金額'] >= min_price]
+            else:
+                filtered_df = filtered_df[filtered_df['標準金額'] >= min_price]
 
+        # 付款方式過濾
         if selected_pay != "全部":
             filtered_df = filtered_df[filtered_df['標準付款方式'] == selected_pay]
 
+        # 時段過濾
         if selected_time_slot != "全部時段" and '小時' in filtered_df.columns:
             if selected_time_slot == "早市/清晨 (05:00 - 08:59)":
                 filtered_df = filtered_df[filtered_df['小時'].between(5, 8)]
@@ -239,48 +252,50 @@ if uploaded_files:
             elif selected_time_slot == "自訂時段區間" and custom_hour_range:
                 filtered_df = filtered_df[filtered_df['小時'].between(custom_hour_range[0], custom_hour_range[1])]
 
+        # 日期過濾
         if date_range and len(date_range) == 2:
             start_d, end_d = date_range[0].strftime('%Y-%m-%d'), date_range[1].strftime('%Y-%m-%d')
             filtered_df = filtered_df[(filtered_df['標準日期'] >= start_d) & (filtered_df['標準日期'] <= end_d)]
 
+        # 載具過濾
         if carrier_filter != "全部" and '載具狀態' in filtered_df.columns:
             filtered_df = filtered_df[filtered_df['載具狀態'] == carrier_filter]
 
-        # 關鍵字智能處理（切分逗點或空白）
+        # 關鍵字過濾
         clean_kw_list = [k.strip() for k in re.split(r'[,，\s]+', item_kw) if k.strip()]
         if clean_kw_list:
-            # 建立包含任何一個關鍵字的遮罩
             kw_pattern = '|'.join([re.escape(k) for k in clean_kw_list])
             has_kw_mask = filtered_df['標準品名'].str.contains(kw_pattern, case=False, na=False)
 
             if kw_mode == "僅看含有關鍵字的商品明細":
                 filtered_df = filtered_df[has_kw_mask]
             else:
-                # 找出符合關鍵字的所有單據編號，再把這些單據的全部商品撈出來
                 matched_orders = filtered_df[has_kw_mask]['標準單號'].unique()
                 filtered_df = filtered_df[filtered_df['標準單號'].isin(matched_orders)]
 
         # --- 統計呈現 ---
         st.subheader("📊 篩選查詢成果概況")
 
-        total_amount = filtered_df['標準金額'].sum()
-        total_quantity = filtered_df['標準數量'].sum()
-        record_count = len(filtered_df)
-        order_count = filtered_df['標準單號'].nunique()
-        
-        has_carrier_count = (filtered_df['載具狀態'] == "有載具").sum()
-        carrier_rate = (has_carrier_count / record_count * 100) if record_count > 0 else 0
+        if len(filtered_df) == 0:
+            st.warning("⚠️ 目前條件下查無任何資料！請檢查：\n1. 【付款方式】是否剛好選到了刷卡，而該筆是用現金？（可切換為「全部」試試）\n2. 【消費金額高於】門檻是否過高？（可先歸 0 測試）")
+        else:
+            total_amount = filtered_df['標準金額'].sum()
+            total_quantity = filtered_df['標準數量'].sum()
+            record_count = len(filtered_df)
+            order_count = filtered_df['標準單號'].nunique()
+            
+            has_carrier_count = (filtered_df['載具狀態'] == "有載具").sum()
+            carrier_rate = (has_carrier_count / record_count * 100) if record_count > 0 else 0
 
-        cash_count = (filtered_df['標準付款方式'] == "現金").sum()
-        card_count = (filtered_df['標準付款方式'] == "刷卡").sum()
+            cash_count = (filtered_df['標準付款方式'] == "現金").sum()
+            card_count = (filtered_df['標準付款方式'] == "刷卡").sum()
 
-        c1, c2, c3, c4 = st.columns(4)
-        c1.metric("💰 總消費金額", f"${total_amount:,.0f} 元")
-        c2.metric("📦 總採購數量/重量", f"{total_quantity:,.1f}")
-        c3.metric("💳 現金 / 刷卡筆數", f"現金 {cash_count} 筆 | 刷卡 {card_count} 筆")
-        c4.metric("📱 載具比例", f"{carrier_rate:.1f}% ({has_carrier_count} 筆有載具)")
+            c1, c2, c3, c4 = st.columns(4)
+            c1.metric("💰 總消費金額", f"${total_amount:,.0f} 元")
+            c2.metric("📦 總採購數量/重量", f"{total_quantity:,.1f}")
+            c3.metric("💳 現金 / 刷卡筆數", f"現金 {cash_count} 筆 | 刷卡 {card_count} 筆")
+            c4.metric("📱 載具比例", f"{carrier_rate:.1f}% ({has_carrier_count} 筆有載具)")
 
-        if len(filtered_df) > 0:
             st.markdown("### 📋 購買品項彙整清單（品名、數量、總金額）")
             item_summary = filtered_df.groupby('標準品名').agg(
                 總數量=('標準數量', 'sum'),
@@ -293,24 +308,24 @@ if uploaded_files:
                 use_container_width=True
             )
 
-        # 詳細清單
-        st.markdown("### 📝 詳細明細數據清單")
-        display_cols = []
-        candidate_cols = [col_date, col_time, col_order, '客戶編號_清洗', '標準品名', '標準數量', '標準金額', '標準付款方式', '載具狀態', '載具內容', col_remark]
-        for c in candidate_cols:
-            if c and c in filtered_df.columns and c not in display_cols:
-                display_cols.append(c)
+            # 詳細清單
+            st.markdown("### 📝 詳細明細數據清單")
+            display_cols = []
+            candidate_cols = [col_date, col_time, '標準單號', '客戶編號_清洗', '標準品名', '標準數量', '標準金額', '整單總金額', '標準付款方式', '載具狀態', '載具內容', col_remark]
+            for c in candidate_cols:
+                if c and c in filtered_df.columns and c not in display_cols:
+                    display_cols.append(c)
 
-        st.dataframe(filtered_df[display_cols], use_container_width=True)
+            st.dataframe(filtered_df[display_cols], use_container_width=True)
 
-        # 下載按鈕
-        csv_export = filtered_df[display_cols].to_csv(index=False, encoding='utf-8-sig')
-        st.download_button(
-            label="📥 匯出當前篩選結果為 CSV",
-            data=csv_export,
-            file_name=f"交易篩選查詢_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
-            mime="text/csv"
-        )
+            # 下載按鈕
+            csv_export = filtered_df[display_cols].to_csv(index=False, encoding='utf-8-sig')
+            st.download_button(
+                label="📥 匯出當前篩選結果為 CSV",
+                data=csv_export,
+                file_name=f"交易篩選查詢_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+                mime="text/csv"
+            )
 
     except Exception as e:
         st.error(f"❌ 查詢處理時發生錯誤：{e}")
