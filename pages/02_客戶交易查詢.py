@@ -102,14 +102,25 @@ if uploaded_files:
         col_time = match_col(['時間', '銷貨時間', '交易時間', '結帳時間'], None)
         col_order = match_col(['銷貨單號', '單號', '交易序號', '發票號碼'], None)
         col_carrier = match_col(['載具', '共通載具', '載具號碼', '手機條碼', '發票載具'], None)
-        
-        # 抓取備註欄位（鎖定 R 欄的備註）
         col_remark = match_col(['備註', '列印備註', '說明'], None)
 
         # 基礎欄位清洗
         full_df['客戶編號_清洗'] = full_df[col_id].apply(clean_customer_id) if col_id in full_df.columns else "未知客戶"
         full_df['標準日期'] = full_df[col_date].apply(try_parse_date) if col_date in full_df.columns else None
         
+        # 標記商品名稱（轉純文字避免空值比對錯誤）
+        if col_item in full_df.columns:
+            full_df['標準品名'] = full_df[col_item].astype(str).str.strip()
+        else:
+            full_df['標準品名'] = ""
+
+        # 單號欄位處理
+        if col_order and col_order in full_df.columns:
+            full_df['標準單號'] = full_df[col_order].astype(str).str.strip()
+        else:
+            # 若無單號欄位，以 日期+客戶 視為同筆單據
+            full_df['標準單號'] = full_df['標準日期'].astype(str) + "_" + full_df['客戶編號_清洗']
+
         if col_time and col_time in full_df.columns:
             full_df['小時'] = full_df[col_time].apply(extract_hour)
         else:
@@ -125,13 +136,11 @@ if uploaded_files:
         else:
             full_df['標準數量'] = 0.0
 
-        # 付款方式精準判斷（依據備註內容是否有信用卡特徵字樣）
+        # 付款方式精準判斷
         def detect_card_or_cash(row):
             remark_text = ""
             if col_remark and col_remark in row and pd.notnull(row[col_remark]):
                 remark_text += str(row[col_remark]).strip()
-            
-            # 若包含「信用卡」、「卡號」、「授權碼」則判定為刷卡，其餘視為現金
             if any(k in remark_text for k in ['信用卡', '卡號', '授權碼', '刷卡']):
                 return "刷卡"
             return "現金"
@@ -162,7 +171,7 @@ if uploaded_files:
         max_amount_data = float(full_df['標準金額'].max()) if not full_df.empty else 10000.0
         min_price = st.sidebar.number_input("💰 消費金額高於 (元) :", min_value=0.0, max_value=max_amount_data, value=0.0, step=100.0)
 
-        # 3. 付款方式篩選（固定為全部、現金、刷卡）
+        # 3. 付款方式篩選
         selected_pay = st.sidebar.radio("💳 付款方式", ["全部", "現金", "刷卡"], horizontal=True)
 
         # 4. 消費時段篩選
@@ -194,8 +203,15 @@ if uploaded_files:
         # 6. 載具條件
         carrier_filter = st.sidebar.radio("📱 載具條件", ["全部", "有載具", "無載具"], horizontal=True)
 
-        # 7. 品項關鍵字
-        item_kw = st.sidebar.text_input("🥩 商品名稱關鍵字", placeholder="例如：五花肉、小排")
+        # 7. 品項關鍵字篩選 (支援多詞與整筆交易反查)
+        st.sidebar.markdown("---")
+        st.sidebar.subheader("🥩 品項關鍵字設定")
+        item_kw = st.sidebar.text_input("輸入關鍵字 (如：軟骨 或 軟骨,五花)", placeholder="輸入如：軟骨")
+        kw_mode = st.sidebar.radio(
+            "關鍵字呈現範圍：",
+            ["僅看含有關鍵字的商品明細", "反查整筆交易（有買此商品的那整單都要看）"],
+            index=0
+        )
 
         # --- 資料過濾 ---
         filtered_df = full_df.copy()
@@ -230,8 +246,19 @@ if uploaded_files:
         if carrier_filter != "全部" and '載具狀態' in filtered_df.columns:
             filtered_df = filtered_df[filtered_df['載具狀態'] == carrier_filter]
 
-        if item_kw.strip() and col_item in filtered_df.columns:
-            filtered_df = filtered_df[filtered_df[col_item].astype(str).str.contains(item_kw.strip(), na=False)]
+        # 關鍵字智能處理（切分逗點或空白）
+        clean_kw_list = [k.strip() for k in re.split(r'[,，\s]+', item_kw) if k.strip()]
+        if clean_kw_list:
+            # 建立包含任何一個關鍵字的遮罩
+            kw_pattern = '|'.join([re.escape(k) for k in clean_kw_list])
+            has_kw_mask = filtered_df['標準品名'].str.contains(kw_pattern, case=False, na=False)
+
+            if kw_mode == "僅看含有關鍵字的商品明細":
+                filtered_df = filtered_df[has_kw_mask]
+            else:
+                # 找出符合關鍵字的所有單據編號，再把這些單據的全部商品撈出來
+                matched_orders = filtered_df[has_kw_mask]['標準單號'].unique()
+                filtered_df = filtered_df[filtered_df['標準單號'].isin(matched_orders)]
 
         # --- 統計呈現 ---
         st.subheader("📊 篩選查詢成果概況")
@@ -239,7 +266,7 @@ if uploaded_files:
         total_amount = filtered_df['標準金額'].sum()
         total_quantity = filtered_df['標準數量'].sum()
         record_count = len(filtered_df)
-        order_count = filtered_df[col_order].nunique() if (col_order and col_order in filtered_df.columns) else record_count
+        order_count = filtered_df['標準單號'].nunique()
         
         has_carrier_count = (filtered_df['載具狀態'] == "有載具").sum()
         carrier_rate = (has_carrier_count / record_count * 100) if record_count > 0 else 0
@@ -253,9 +280,9 @@ if uploaded_files:
         c3.metric("💳 現金 / 刷卡筆數", f"現金 {cash_count} 筆 | 刷卡 {card_count} 筆")
         c4.metric("📱 載具比例", f"{carrier_rate:.1f}% ({has_carrier_count} 筆有載具)")
 
-        if col_item in filtered_df.columns and len(filtered_df) > 0:
-            st.markdown("### 📋 購買品項彙整清單")
-            item_summary = filtered_df.groupby(col_item).agg(
+        if len(filtered_df) > 0:
+            st.markdown("### 📋 購買品項彙整清單（品名、數量、總金額）")
+            item_summary = filtered_df.groupby('標準品名').agg(
                 總數量=('標準數量', 'sum'),
                 總金額=('標準金額', 'sum'),
                 筆數=('標準金額', 'count')
@@ -269,7 +296,7 @@ if uploaded_files:
         # 詳細清單
         st.markdown("### 📝 詳細明細數據清單")
         display_cols = []
-        candidate_cols = [col_date, col_time, col_order, '客戶編號_清洗', col_item, '標準數量', '標準金額', '標準付款方式', '載具狀態', '載具內容', col_remark]
+        candidate_cols = [col_date, col_time, col_order, '客戶編號_清洗', '標準品名', '標準數量', '標準金額', '標準付款方式', '載具狀態', '載具內容', col_remark]
         for c in candidate_cols:
             if c and c in filtered_df.columns and c not in display_cols:
                 display_cols.append(c)
